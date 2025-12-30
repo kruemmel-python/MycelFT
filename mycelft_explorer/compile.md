@@ -23,7 +23,7 @@ cd build-gpp
 g++ -std=c++17 -O2 -municode -DUNICODE -D_UNICODE \
   ../MycelFTExplorer.cpp \
   -o MycelFTExplorer.exe \
-  -lcomctl32 -luxtheme -lgdi32
+  -lcomctl32 -luxtheme -lgdi32 -lbcrypt -lshell32
 ```
 
 ### Hinweise
@@ -31,6 +31,8 @@ g++ -std=c++17 -O2 -municode -DUNICODE -D_UNICODE \
 - `-lcomctl32` ist erforderlich für den ListView-Container.
 - `-luxtheme` ist erforderlich für `SetWindowTheme` (Explorer-Style).
 - `-lgdi32` ist erforderlich für Schriftarten (CreateFontW/DeleteObject).
+- `-lbcrypt` ist erforderlich für HMAC-SHA256 (Integritätsprüfung).
+- `-lshell32` ist erforderlich für Shell-Funktionen (Icons, Öffnen).
 
 ## 3) Ausführen
 

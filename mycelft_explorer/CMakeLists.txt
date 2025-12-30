@@ -6,4 +6,4 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(MycelFTExplorer MycelFTExplorer.cpp)
 target_compile_definitions(MycelFTExplorer PRIVATE UNICODE _UNICODE)
-target_link_libraries(MycelFTExplorer PRIVATE comctl32)
+target_link_libraries(MycelFTExplorer PRIVATE comctl32 uxtheme gdi32 bcrypt shell32)

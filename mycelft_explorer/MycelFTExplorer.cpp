@@ -3,6 +3,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <uxtheme.h>
+#include <bcrypt.h>
 #include <stdint.h>
 #include <cmath>
 #include <string>
@@ -149,6 +150,268 @@ uint64_t MycelSeedForPath(const std::wstring& path) {
     return HashNameWithSerial(BaseName(path), serial);
 }
 
+constexpr size_t kHmacSize = 32;
+const wchar_t* kHmacStreamName = L"mycelft.hmac";
+
+bool SeekFile(HANDLE file, uint64_t offset) {
+    LARGE_INTEGER seekPos = {};
+    seekPos.QuadPart = static_cast<LONGLONG>(offset);
+    return SetFilePointerEx(file, seekPos, nullptr, FILE_BEGIN) != 0;
+}
+
+std::wstring AdsPath(const std::wstring& path, const std::wstring& streamName) {
+    return path + L":" + streamName;
+}
+
+bool ReadAdsData(const std::wstring& path,
+                 const std::wstring& streamName,
+                 std::vector<uint8_t>& data,
+                 bool& exists,
+                 std::wstring& error) {
+    exists = false;
+    std::wstring streamPath = AdsPath(path, streamName);
+    HANDLE stream = CreateFileW(streamPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (stream == INVALID_HANDLE_VALUE) {
+        DWORD lastError = GetLastError();
+        if (lastError == ERROR_FILE_NOT_FOUND || lastError == ERROR_PATH_NOT_FOUND) {
+            return true;
+        }
+        error = L"Konnte HMAC-Stream nicht öffnen.";
+        return false;
+    }
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(stream, &size)) {
+        CloseHandle(stream);
+        error = L"Konnte HMAC-Stream nicht lesen.";
+        return false;
+    }
+
+    data.resize(static_cast<size_t>(size.QuadPart));
+    DWORD bytesRead = 0;
+    if (size.QuadPart > 0 &&
+        !ReadFile(stream, data.data(), static_cast<DWORD>(data.size()), &bytesRead, nullptr)) {
+        CloseHandle(stream);
+        error = L"Konnte HMAC-Stream nicht lesen.";
+        return false;
+    }
+
+    CloseHandle(stream);
+    exists = true;
+    return true;
+}
+
+bool WriteAdsData(const std::wstring& path,
+                  const std::wstring& streamName,
+                  const std::vector<uint8_t>& data,
+                  std::wstring& error) {
+    std::wstring streamPath = AdsPath(path, streamName);
+    HANDLE stream = CreateFileW(streamPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (stream == INVALID_HANDLE_VALUE) {
+        error = L"Konnte HMAC-Stream nicht schreiben.";
+        return false;
+    }
+
+    DWORD bytesWritten = 0;
+    if (!data.empty() &&
+        (!WriteFile(stream, data.data(), static_cast<DWORD>(data.size()), &bytesWritten, nullptr) ||
+         bytesWritten != data.size())) {
+        CloseHandle(stream);
+        error = L"Konnte HMAC-Stream nicht schreiben.";
+        return false;
+    }
+
+    CloseHandle(stream);
+    return true;
+}
+
+void DeleteAdsData(const std::wstring& path, const std::wstring& streamName) {
+    std::wstring streamPath = AdsPath(path, streamName);
+    DeleteFileW(streamPath.c_str());
+}
+
+std::vector<uint8_t> DeriveHmacKey(uint64_t seed) {
+    std::vector<uint8_t> key(kHmacSize);
+    uint64_t state = seed ^ 0xA5A5A5A5A5A5A5A5ULL;
+    for (size_t i = 0; i < key.size(); ++i) {
+        state = MycelNextRand(state);
+        key[i] = static_cast<uint8_t>(state & 0xFF);
+    }
+    return key;
+}
+
+bool InitHmac(uint64_t seed,
+              BCRYPT_ALG_HANDLE& algHandle,
+              BCRYPT_HASH_HANDLE& hashHandle,
+              std::vector<BYTE>& hashObject,
+              std::wstring& error) {
+    BCRYPT_ALG_HANDLE hAlg = nullptr;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(&hAlg,
+                                                  BCRYPT_SHA256_ALGORITHM,
+                                                  nullptr,
+                                                  BCRYPT_ALG_HANDLE_HMAC_FLAG);
+    if (status != 0) {
+        error = L"Konnte HMAC-Provider nicht öffnen.";
+        return false;
+    }
+
+    DWORD objectLength = 0;
+    DWORD cbResult = 0;
+    status = BCryptGetProperty(hAlg,
+                               BCRYPT_OBJECT_LENGTH,
+                               reinterpret_cast<PUCHAR>(&objectLength),
+                               sizeof(objectLength),
+                               &cbResult,
+                               0);
+    if (status != 0) {
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        error = L"Konnte HMAC-Objektlänge nicht lesen.";
+        return false;
+    }
+
+    hashObject.resize(objectLength);
+    std::vector<uint8_t> key = DeriveHmacKey(seed);
+
+    BCRYPT_HASH_HANDLE hHash = nullptr;
+    status = BCryptCreateHash(hAlg,
+                              &hHash,
+                              hashObject.data(),
+                              static_cast<ULONG>(hashObject.size()),
+                              key.data(),
+                              static_cast<ULONG>(key.size()),
+                              0);
+    if (status != 0) {
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        error = L"Konnte HMAC-Hash nicht erstellen.";
+        return false;
+    }
+
+    algHandle = hAlg;
+    hashHandle = hHash;
+    return true;
+}
+
+bool FinishHmac(BCRYPT_ALG_HANDLE algHandle,
+                BCRYPT_HASH_HANDLE hashHandle,
+                std::vector<uint8_t>& outHash,
+                std::wstring& error) {
+    outHash.assign(kHmacSize, 0);
+    NTSTATUS status = BCryptFinishHash(hashHandle,
+                                       outHash.data(),
+                                       static_cast<ULONG>(outHash.size()),
+                                       0);
+    BCryptDestroyHash(hashHandle);
+    BCryptCloseAlgorithmProvider(algHandle, 0);
+    if (status != 0) {
+        error = L"Konnte HMAC nicht abschließen.";
+        return false;
+    }
+    return true;
+}
+
+bool ComputeHmacForFile(HANDLE file, uint64_t seed, std::vector<uint8_t>& outHash, std::wstring& error) {
+    if (!SeekFile(file, 0)) {
+        error = L"Konnte Datei nicht lesen (Seek).";
+        return false;
+    }
+
+    BCRYPT_ALG_HANDLE algHandle = nullptr;
+    BCRYPT_HASH_HANDLE hashHandle = nullptr;
+    std::vector<BYTE> hashObject;
+
+    if (!InitHmac(seed, algHandle, hashHandle, hashObject, error)) {
+        return false;
+    }
+
+    std::vector<uint8_t> buffer(kIoChunkSize);
+    DWORD bytesRead = 0;
+    while (ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) &&
+           bytesRead > 0) {
+        NTSTATUS status = BCryptHashData(hashHandle, buffer.data(), bytesRead, 0);
+        if (status != 0) {
+            BCryptDestroyHash(hashHandle);
+            BCryptCloseAlgorithmProvider(algHandle, 0);
+            error = L"Konnte HMAC nicht berechnen.";
+            return false;
+        }
+    }
+
+    return FinishHmac(algHandle, hashHandle, outHash, error);
+}
+
+bool TransformFilePass(HANDLE file,
+                       uint64_t seed,
+                       uint64_t fileSize,
+                       bool computeHmac,
+                       std::vector<uint8_t>* outHmac,
+                       std::wstring& error) {
+    if (!SeekFile(file, 0)) {
+        error = L"Konnte Datei nicht lesen (Seek).";
+        return false;
+    }
+
+    BCRYPT_ALG_HANDLE algHandle = nullptr;
+    BCRYPT_HASH_HANDLE hashHandle = nullptr;
+    std::vector<BYTE> hashObject;
+
+    if (computeHmac) {
+        if (!InitHmac(seed, algHandle, hashHandle, hashObject, error)) {
+            return false;
+        }
+    }
+
+    uint64_t offset = 0;
+    std::vector<uint8_t> buffer(kIoChunkSize);
+    while (offset < fileSize) {
+        DWORD toRead = static_cast<DWORD>(std::min<uint64_t>(buffer.size(), fileSize - offset));
+        DWORD bytesRead = 0;
+        DWORD bytesWritten = 0;
+
+        if (!ReadFile(file, buffer.data(), toRead, &bytesRead, nullptr)) {
+            if (computeHmac) {
+                BCryptDestroyHash(hashHandle);
+                BCryptCloseAlgorithmProvider(algHandle, 0);
+            }
+            error = L"Datei konnte nicht gelesen werden.";
+            return false;
+        }
+
+        MycelProcessBuffer(buffer.data(), bytesRead, seed, offset);
+
+        if (computeHmac) {
+            NTSTATUS status = BCryptHashData(hashHandle, buffer.data(), bytesRead, 0);
+            if (status != 0) {
+                BCryptDestroyHash(hashHandle);
+                BCryptCloseAlgorithmProvider(algHandle, 0);
+                error = L"Konnte HMAC nicht berechnen.";
+                return false;
+            }
+        }
+
+        if (!SeekFile(file, offset) ||
+            !WriteFile(file, buffer.data(), bytesRead, &bytesWritten, nullptr) ||
+            bytesWritten != bytesRead) {
+            if (computeHmac) {
+                BCryptDestroyHash(hashHandle);
+                BCryptCloseAlgorithmProvider(algHandle, 0);
+            }
+            error = L"Datei konnte nicht geschrieben werden.";
+            return false;
+        }
+
+        offset += bytesRead;
+    }
+
+    if (computeHmac) {
+        if (!FinishHmac(algHandle, hashHandle, *outHmac, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool TransformFile(const std::wstring& path, std::wstring& error) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -165,40 +428,122 @@ bool TransformFile(const std::wstring& path, std::wstring& error) {
     }
 
     uint64_t seed = MycelSeedForPath(path);
-    uint64_t offset = 0;
-    std::vector<uint8_t> buffer(kIoChunkSize);
+    std::vector<uint8_t> storedHmac;
+    bool hasHmac = false;
+    if (!ReadAdsData(path, kHmacStreamName, storedHmac, hasHmac, error)) {
+        CloseHandle(file);
+        return false;
+    }
 
-    while (offset < static_cast<uint64_t>(fileSize.QuadPart)) {
-        DWORD toRead = static_cast<DWORD>(
-            std::min<uint64_t>(buffer.size(), fileSize.QuadPart - offset));
-        DWORD bytesRead = 0;
-        DWORD bytesWritten = 0;
-
-        LARGE_INTEGER seekPos = {};
-        seekPos.QuadPart = static_cast<LONGLONG>(offset);
-        if (!SetFilePointerEx(file, seekPos, nullptr, FILE_BEGIN) ||
-            !ReadFile(file, buffer.data(), toRead, &bytesRead, nullptr)) {
+    if (hasHmac) {
+        if (storedHmac.size() != kHmacSize) {
             CloseHandle(file);
-            error = L"Datei konnte nicht gelesen werden.";
+            error = L"HMAC-Stream hat ungültige Länge.";
             return false;
         }
 
-        MycelProcessBuffer(buffer.data(), bytesRead, seed, offset);
-
-        seekPos.QuadPart = static_cast<LONGLONG>(offset);
-        if (!SetFilePointerEx(file, seekPos, nullptr, FILE_BEGIN) ||
-            !WriteFile(file, buffer.data(), bytesRead, &bytesWritten, nullptr) ||
-            bytesWritten != bytesRead) {
+        std::vector<uint8_t> computedHmac;
+        if (!ComputeHmacForFile(file, seed, computedHmac, error)) {
             CloseHandle(file);
-            error = L"Datei konnte nicht geschrieben werden.";
             return false;
         }
 
-        offset += bytesRead;
+        if (computedHmac != storedHmac) {
+            CloseHandle(file);
+            error = L"Integritätsprüfung fehlgeschlagen.";
+            return false;
+        }
+
+        if (!TransformFilePass(file,
+                               seed,
+                               static_cast<uint64_t>(fileSize.QuadPart),
+                               false,
+                               nullptr,
+                               error)) {
+            CloseHandle(file);
+            return false;
+        }
+
+        DeleteAdsData(path, kHmacStreamName);
+    } else {
+        std::vector<uint8_t> computedHmac;
+        if (!TransformFilePass(file,
+                               seed,
+                               static_cast<uint64_t>(fileSize.QuadPart),
+                               true,
+                               &computedHmac,
+                               error)) {
+            CloseHandle(file);
+            return false;
+        }
+
+        if (!WriteAdsData(path, kHmacStreamName, computedHmac, error)) {
+            CloseHandle(file);
+            return false;
+        }
     }
 
     CloseHandle(file);
     return true;
+}
+
+void ProcessFolderRecursive(const std::wstring& folder,
+                            uint64_t& processed,
+                            uint64_t& failed,
+                            std::wstring& lastError) {
+    std::wstring searchPath = folder;
+    if (!searchPath.empty() && searchPath.back() != L'\\') {
+        searchPath.push_back(L'\\');
+    }
+    searchPath += L"*";
+
+    WIN32_FIND_DATAW findData = {};
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        lastError = L"Ordner konnte nicht gelesen werden.";
+        failed++;
+        return;
+    }
+
+    do {
+        if (findData.cFileName[0] == L'.') {
+            continue;
+        }
+        std::wstring itemPath = folder;
+        if (!itemPath.empty() && itemPath.back() != L'\\') {
+            itemPath.push_back(L'\\');
+        }
+        itemPath += findData.cFileName;
+
+        bool isDir = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        bool isReparse = (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+
+        if (isDir) {
+            if (!isReparse) {
+                ProcessFolderRecursive(itemPath, processed, failed, lastError);
+            }
+            continue;
+        }
+
+        std::wstring error;
+        if (TransformFile(itemPath, error)) {
+            processed++;
+        } else {
+            failed++;
+            lastError = error;
+        }
+    } while (FindNextFileW(hFind, &findData));
+
+    FindClose(hFind);
+}
+
+std::wstring RootFromPath(const std::wstring& path) {
+    if (path.size() >= 2 && path[1] == L':') {
+        std::wstring root = path.substr(0, 2);
+        root.push_back(L'\\');
+        return root;
+    }
+    return L"C:\\";
 }
 
 enum ControlId {
@@ -206,7 +551,9 @@ enum ControlId {
     kTransformId = 2,
     kOpenId = 3,
     kDeleteId = 4,
-    kUpId = 5
+    kUpId = 5,
+    kTransformFolderId = 6,
+    kTransformDriveId = 7
 };
 
 struct UiState {
@@ -426,6 +773,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                             860, 10, 60, 24, hwnd,
                                             reinterpret_cast<HMENU>(kUpId), nullptr, nullptr);
+            HWND folderButton = CreateWindowExW(0, WC_BUTTONW, L"Folder",
+                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                930, 10, 80, 24, hwnd,
+                                                reinterpret_cast<HMENU>(kTransformFolderId), nullptr, nullptr);
+            HWND driveButton = CreateWindowExW(0, WC_BUTTONW, L"Drive",
+                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                               1020, 10, 80, 24, hwnd,
+                                               reinterpret_cast<HMENU>(kTransformDriveId), nullptr, nullptr);
 
             RECT rect;
             GetClientRect(hwnd, &rect);
@@ -468,6 +823,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             SendMessageW(openButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
             SendMessageW(deleteButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
             SendMessageW(upButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(folderButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(driveButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
             SendMessageW(ui.listView, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
             SendMessageW(ui.statusBar, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
 
@@ -586,6 +943,51 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     }
                     return 0;
                 }
+                case kTransformFolderId: {
+                    std::wstring folder = GetEditText(ui.pathEdit);
+                    if (folder.empty()) {
+                        ShowMessage(hwnd, L"Bitte einen Ordner angeben.");
+                        return 0;
+                    }
+                    uint64_t processed = 0;
+                    uint64_t failed = 0;
+                    std::wstring lastError;
+                    ProcessFolderRecursive(folder, processed, failed, lastError);
+                    std::wstring message = L"Fertig. Dateien verarbeitet: " + std::to_wstring(processed);
+                    if (failed > 0) {
+                        message += L"\nFehler: " + std::to_wstring(failed);
+                        if (!lastError.empty()) {
+                            message += L"\nLetzter Fehler: " + lastError;
+                        }
+                    }
+                    ShowMessage(hwnd, message);
+                    PopulateListView(ui, folder);
+                    return 0;
+                }
+                case kTransformDriveId: {
+                    std::wstring folder = GetEditText(ui.pathEdit);
+                    std::wstring root = RootFromPath(folder);
+                    std::wstring prompt = L"Ganzen Datenträger " + root +
+                                          L" verarbeiten? Dies kann lange dauern.";
+                    if (MessageBoxW(hwnd, prompt.c_str(), L"MycelFT Explorer",
+                                    MB_YESNO | MB_ICONWARNING) != IDYES) {
+                        return 0;
+                    }
+                    uint64_t processed = 0;
+                    uint64_t failed = 0;
+                    std::wstring lastError;
+                    ProcessFolderRecursive(root, processed, failed, lastError);
+                    std::wstring message = L"Fertig. Dateien verarbeitet: " + std::to_wstring(processed);
+                    if (failed > 0) {
+                        message += L"\nFehler: " + std::to_wstring(failed);
+                        if (!lastError.empty()) {
+                            message += L"\nLetzter Fehler: " + lastError;
+                        }
+                    }
+                    ShowMessage(hwnd, message);
+                    PopulateListView(ui, folder);
+                    return 0;
+                }
                 default:
                     break;
             }
@@ -621,7 +1023,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
 
     HWND hwnd = CreateWindowExW(0, kClassName, L"MycelFT Explorer",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                                960, 600, nullptr, nullptr, instance, nullptr);
+                                1180, 640, nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         return 0;
     }
