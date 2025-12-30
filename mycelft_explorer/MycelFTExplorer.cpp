@@ -171,7 +171,9 @@ bool TransformFile(const std::wstring& path, std::wstring& error) {
         DWORD bytesRead = 0;
         DWORD bytesWritten = 0;
 
-        if (!SetFilePointerEx(file, {static_cast<LONGLONG>(offset)}, nullptr, FILE_BEGIN) ||
+        LARGE_INTEGER seekPos = {};
+        seekPos.QuadPart = static_cast<LONGLONG>(offset);
+        if (!SetFilePointerEx(file, seekPos, nullptr, FILE_BEGIN) ||
             !ReadFile(file, buffer.data(), toRead, &bytesRead, nullptr)) {
             CloseHandle(file);
             error = L"Datei konnte nicht gelesen werden.";
@@ -180,7 +182,8 @@ bool TransformFile(const std::wstring& path, std::wstring& error) {
 
         MycelProcessBuffer(buffer.data(), bytesRead, seed, offset);
 
-        if (!SetFilePointerEx(file, {static_cast<LONGLONG>(offset)}, nullptr, FILE_BEGIN) ||
+        seekPos.QuadPart = static_cast<LONGLONG>(offset);
+        if (!SetFilePointerEx(file, seekPos, nullptr, FILE_BEGIN) ||
             !WriteFile(file, buffer.data(), bytesRead, &bytesWritten, nullptr) ||
             bytesWritten != bytesRead) {
             CloseHandle(file);
