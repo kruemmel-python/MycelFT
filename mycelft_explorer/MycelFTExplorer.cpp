@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <stdint.h>
 #include <cmath>
 #include <string>
@@ -198,13 +199,43 @@ bool TransformFile(const std::wstring& path, std::wstring& error) {
     return true;
 }
 
+enum ControlId {
+    kRefreshId = 1,
+    kTransformId = 2,
+    kOpenId = 3,
+    kDeleteId = 4,
+    kUpId = 5
+};
+
 struct UiState {
     HWND window = nullptr;
     HWND pathEdit = nullptr;
     HWND listView = nullptr;
 };
 
+struct ItemInfo {
+    bool isDirectory = false;
+    uint64_t size = 0;
+};
+
+void CleanupListViewItems(const UiState& ui);
+
+std::wstring FormatSize(uint64_t size) {
+    wchar_t buffer[64] = {};
+    if (size >= (1024ULL * 1024ULL * 1024ULL)) {
+        swprintf_s(buffer, L"%.2f GB", static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0));
+    } else if (size >= (1024ULL * 1024ULL)) {
+        swprintf_s(buffer, L"%.2f MB", static_cast<double>(size) / (1024.0 * 1024.0));
+    } else if (size >= 1024ULL) {
+        swprintf_s(buffer, L"%.2f KB", static_cast<double>(size) / 1024.0);
+    } else {
+        swprintf_s(buffer, L"%llu B", static_cast<unsigned long long>(size));
+    }
+    return buffer;
+}
+
 void PopulateListView(const UiState& ui, const std::wstring& folder) {
+    CleanupListViewItems(ui);
     ListView_DeleteAllItems(ui.listView);
 
     std::wstring searchPath = folder;
@@ -219,18 +250,44 @@ void PopulateListView(const UiState& ui, const std::wstring& folder) {
         return;
     }
 
-    int index = 0;
+    std::vector<std::pair<std::wstring, ItemInfo>> entries;
     do {
         if (findData.cFileName[0] == L'.') {
             continue;
         }
-        LVITEMW item = {};
-        item.mask = LVIF_TEXT;
-        item.iItem = index++;
-        item.pszText = findData.cFileName;
-        ListView_InsertItem(ui.listView, &item);
+        ItemInfo info = {};
+        info.isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (!info.isDirectory) {
+            info.size = (static_cast<uint64_t>(findData.nFileSizeHigh) << 32) | findData.nFileSizeLow;
+        }
+        entries.emplace_back(findData.cFileName, info);
     } while (FindNextFileW(hFind, &findData));
     FindClose(hFind);
+
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const auto& a, const auto& b) {
+                         if (a.second.isDirectory != b.second.isDirectory) {
+                             return a.second.isDirectory > b.second.isDirectory;
+                         }
+                         return _wcsicmp(a.first.c_str(), b.first.c_str()) < 0;
+                     });
+
+    int index = 0;
+    for (const auto& entry : entries) {
+        LVITEMW item = {};
+        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.iItem = index;
+        item.pszText = const_cast<LPWSTR>(entry.first.c_str());
+        ItemInfo* info = new ItemInfo(entry.second);
+        item.lParam = reinterpret_cast<LPARAM>(info);
+        ListView_InsertItem(ui.listView, &item);
+
+        std::wstring typeText = entry.second.isDirectory ? L"Folder" : L"File";
+        ListView_SetItemText(ui.listView, index, 1, const_cast<LPWSTR>(typeText.c_str()));
+        std::wstring sizeText = entry.second.isDirectory ? L"" : FormatSize(entry.second.size);
+        ListView_SetItemText(ui.listView, index, 2, const_cast<LPWSTR>(sizeText.c_str()));
+        ++index;
+    }
 }
 
 std::wstring GetEditText(HWND edit) {
@@ -254,6 +311,33 @@ std::wstring SelectedFilePath(const UiState& ui) {
     return folder + name;
 }
 
+bool SelectedItemIsDirectory(const UiState& ui) {
+    int index = ListView_GetNextItem(ui.listView, -1, LVNI_SELECTED);
+    if (index < 0) {
+        return false;
+    }
+    LVITEMW item = {};
+    item.mask = LVIF_PARAM;
+    item.iItem = index;
+    if (!ListView_GetItem(ui.listView, &item)) {
+        return false;
+    }
+    ItemInfo* info = reinterpret_cast<ItemInfo*>(item.lParam);
+    return info && info->isDirectory;
+}
+
+void CleanupListViewItems(const UiState& ui) {
+    int count = ListView_GetItemCount(ui.listView);
+    for (int i = 0; i < count; ++i) {
+        LVITEMW item = {};
+        item.mask = LVIF_PARAM;
+        item.iItem = i;
+        if (ListView_GetItem(ui.listView, &item)) {
+            delete reinterpret_cast<ItemInfo*>(item.lParam);
+        }
+    }
+}
+
 void ShowMessage(HWND hwnd, const std::wstring& message) {
     MessageBoxW(hwnd, message.c_str(), L"MycelFT Explorer", MB_OK | MB_ICONINFORMATION);
 }
@@ -272,24 +356,43 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             HWND refreshButton = CreateWindowExW(0, WC_BUTTONW, L"Refresh",
                                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                                  420, 10, 100, 24, hwnd,
-                                                 reinterpret_cast<HMENU>(1), nullptr, nullptr);
+                                                 reinterpret_cast<HMENU>(kRefreshId), nullptr, nullptr);
             HWND applyButton = CreateWindowExW(0, WC_BUTTONW, L"Encrypt/Decrypt",
                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                                530, 10, 140, 24, hwnd,
-                                               reinterpret_cast<HMENU>(2), nullptr, nullptr);
+                                               reinterpret_cast<HMENU>(kTransformId), nullptr, nullptr);
+            HWND openButton = CreateWindowExW(0, WC_BUTTONW, L"Open",
+                                              WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                              680, 10, 80, 24, hwnd,
+                                              reinterpret_cast<HMENU>(kOpenId), nullptr, nullptr);
+            HWND deleteButton = CreateWindowExW(0, WC_BUTTONW, L"Delete",
+                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                770, 10, 80, 24, hwnd,
+                                                reinterpret_cast<HMENU>(kDeleteId), nullptr, nullptr);
+            HWND upButton = CreateWindowExW(0, WC_BUTTONW, L"Up",
+                                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                            860, 10, 60, 24, hwnd,
+                                            reinterpret_cast<HMENU>(kUpId), nullptr, nullptr);
 
             RECT rect;
             GetClientRect(hwnd, &rect);
             ui.listView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
-                                          WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+                                          WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_EDITLABELS,
                                           10, 44, rect.right - 20, rect.bottom - 54,
                                           hwnd, nullptr, nullptr, nullptr);
+            ListView_SetExtendedListViewStyle(ui.listView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
             LVCOLUMNW column = {};
             column.mask = LVCF_TEXT | LVCF_WIDTH;
             column.pszText = const_cast<LPWSTR>(L"Name");
-            column.cx = rect.right - 40;
+            column.cx = rect.right - 320;
             ListView_InsertColumn(ui.listView, 0, &column);
+            column.pszText = const_cast<LPWSTR>(L"Type");
+            column.cx = 120;
+            ListView_InsertColumn(ui.listView, 1, &column);
+            column.pszText = const_cast<LPWSTR>(L"Size");
+            column.cx = 120;
+            ListView_InsertColumn(ui.listView, 2, &column);
 
             PopulateListView(ui, GetEditText(ui.pathEdit));
             return 0;
@@ -300,13 +403,51 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             SetWindowPos(ui.listView, nullptr, 10, 44, rect.right - 20, rect.bottom - 54, SWP_NOZORDER);
             return 0;
         }
+        case WM_NOTIFY: {
+            LPNMHDR hdr = reinterpret_cast<LPNMHDR>(lparam);
+            if (hdr->hwndFrom == ui.listView) {
+                if (hdr->code == NM_DBLCLK) {
+                    std::wstring path = SelectedFilePath(ui);
+                    if (path.empty()) {
+                        return 0;
+                    }
+                    if (SelectedItemIsDirectory(ui)) {
+                        SetWindowTextW(ui.pathEdit, path.c_str());
+                        PopulateListView(ui, path);
+                    } else {
+                        ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+                    return 0;
+                }
+                if (hdr->code == LVN_ENDLABELEDITW) {
+                    NMLVDISPINFOW* info = reinterpret_cast<NMLVDISPINFOW*>(lparam);
+                    if (info->item.pszText) {
+                        wchar_t oldName[MAX_PATH] = {};
+                        ListView_GetItemText(ui.listView, info->item.iItem, 0, oldName, MAX_PATH);
+                        std::wstring folder = GetEditText(ui.pathEdit);
+                        if (!folder.empty() && folder.back() != L'\\') {
+                            folder.push_back(L'\\');
+                        }
+                        std::wstring oldPath = folder + oldName;
+                        std::wstring newPath = folder + info->item.pszText;
+                        if (!MoveFileW(oldPath.c_str(), newPath.c_str())) {
+                            ShowMessage(hwnd, L"Umbenennen fehlgeschlagen.");
+                            return 0;
+                        }
+                        PopulateListView(ui, folder);
+                    }
+                    return 0;
+                }
+            }
+            break;
+        }
         case WM_COMMAND: {
             switch (LOWORD(wparam)) {
-                case 1: {
+                case kRefreshId: {
                     PopulateListView(ui, GetEditText(ui.pathEdit));
                     return 0;
                 }
-                case 2: {
+                case kTransformId: {
                     std::wstring path = SelectedFilePath(ui);
                     if (path.empty()) {
                         ShowMessage(hwnd, L"Bitte eine Datei auswählen.");
@@ -320,12 +461,50 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     }
                     return 0;
                 }
+                case kOpenId: {
+                    std::wstring path = SelectedFilePath(ui);
+                    if (path.empty()) {
+                        ShowMessage(hwnd, L"Bitte eine Datei auswählen.");
+                        return 0;
+                    }
+                    ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    return 0;
+                }
+                case kDeleteId: {
+                    std::wstring path = SelectedFilePath(ui);
+                    if (path.empty()) {
+                        ShowMessage(hwnd, L"Bitte eine Datei auswählen.");
+                        return 0;
+                    }
+                    if (SelectedItemIsDirectory(ui)) {
+                        if (!RemoveDirectoryW(path.c_str())) {
+                            ShowMessage(hwnd, L"Ordner konnte nicht gelöscht werden.");
+                        }
+                    } else {
+                        if (!DeleteFileW(path.c_str())) {
+                            ShowMessage(hwnd, L"Datei konnte nicht gelöscht werden.");
+                        }
+                    }
+                    PopulateListView(ui, GetEditText(ui.pathEdit));
+                    return 0;
+                }
+                case kUpId: {
+                    std::wstring folder = GetEditText(ui.pathEdit);
+                    size_t pos = folder.find_last_of(L"\\/");
+                    if (pos != std::wstring::npos && pos > 2) {
+                        folder = folder.substr(0, pos);
+                        SetWindowTextW(ui.pathEdit, folder.c_str());
+                        PopulateListView(ui, folder);
+                    }
+                    return 0;
+                }
                 default:
                     break;
             }
             break;
         }
         case WM_DESTROY:
+            CleanupListViewItems(ui);
             PostQuitMessage(0);
             return 0;
         default:
@@ -351,7 +530,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
 
     HWND hwnd = CreateWindowExW(0, kClassName, L"MycelFT Explorer",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                                720, 480, nullptr, nullptr, instance, nullptr);
+                                960, 600, nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
         return 0;
     }
