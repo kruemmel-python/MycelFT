@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <stdint.h>
 #include <cmath>
 #include <string>
@@ -211,6 +212,9 @@ struct UiState {
     HWND window = nullptr;
     HWND pathEdit = nullptr;
     HWND listView = nullptr;
+    HWND statusBar = nullptr;
+    HFONT uiFont = nullptr;
+    HIMAGELIST smallIcons = nullptr;
 };
 
 struct ItemInfo {
@@ -275,11 +279,25 @@ void PopulateListView(const UiState& ui, const std::wstring& folder) {
     int index = 0;
     for (const auto& entry : entries) {
         LVITEMW item = {};
-        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
         item.iItem = index;
         item.pszText = const_cast<LPWSTR>(entry.first.c_str());
         ItemInfo* info = new ItemInfo(entry.second);
         item.lParam = reinterpret_cast<LPARAM>(info);
+
+        std::wstring fullPath = folder;
+        if (!fullPath.empty() && fullPath.back() != L'\\') {
+            fullPath.push_back(L'\\');
+        }
+        fullPath += entry.first;
+        SHFILEINFOW sfi = {};
+        SHGetFileInfoW(fullPath.c_str(),
+                       entry.second.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL,
+                       &sfi,
+                       sizeof(sfi),
+                       SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+        item.iImage = sfi.iIcon;
+
         ListView_InsertItem(ui.listView, &item);
 
         std::wstring typeText = entry.second.isDirectory ? L"Folder" : L"File";
@@ -288,6 +306,7 @@ void PopulateListView(const UiState& ui, const std::wstring& folder) {
         ListView_SetItemText(ui.listView, index, 2, const_cast<LPWSTR>(sizeText.c_str()));
         ++index;
     }
+    UpdateStatusBar(ui);
 }
 
 std::wstring GetEditText(HWND edit) {
@@ -338,6 +357,35 @@ void CleanupListViewItems(const UiState& ui) {
     }
 }
 
+void UpdateStatusBar(const UiState& ui) {
+    int total = ListView_GetItemCount(ui.listView);
+    int selected = ListView_GetSelectedCount(ui.listView);
+    wchar_t left[128] = {};
+    wchar_t right[128] = {};
+    swprintf_s(left, L"%d Elemente", total);
+    if (selected == 1) {
+        int index = ListView_GetNextItem(ui.listView, -1, LVNI_SELECTED);
+        LVITEMW item = {};
+        item.mask = LVIF_PARAM;
+        item.iItem = index;
+        if (ListView_GetItem(ui.listView, &item)) {
+            ItemInfo* info = reinterpret_cast<ItemInfo*>(item.lParam);
+            if (info && !info->isDirectory) {
+                std::wstring sizeText = FormatSize(info->size);
+                swprintf_s(right, L"%s", sizeText.c_str());
+            } else {
+                swprintf_s(right, L"Ordner");
+            }
+        }
+    } else if (selected > 1) {
+        swprintf_s(right, L"%d ausgewählt", selected);
+    } else {
+        right[0] = L'\0';
+    }
+    SendMessageW(ui.statusBar, SB_SETTEXT, 0, reinterpret_cast<LPARAM>(left));
+    SendMessageW(ui.statusBar, SB_SETTEXT, 1, reinterpret_cast<LPARAM>(right));
+}
+
 void ShowMessage(HWND hwnd, const std::wstring& message) {
     MessageBoxW(hwnd, message.c_str(), L"MycelFT Explorer", MB_OK | MB_ICONINFORMATION);
 }
@@ -350,6 +398,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
         case WM_CREATE: {
             ui.window = hwnd;
+            ui.uiFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             ui.pathEdit = CreateWindowExW(0, WC_EDITW, L"C:\\",
                                           WS_CHILD | WS_VISIBLE | WS_BORDER | ES_LEFT,
                                           10, 10, 400, 24, hwnd, nullptr, nullptr, nullptr);
@@ -381,6 +432,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                                           10, 44, rect.right - 20, rect.bottom - 54,
                                           hwnd, nullptr, nullptr, nullptr);
             ListView_SetExtendedListViewStyle(ui.listView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+            SetWindowTheme(ui.listView, L"Explorer", nullptr);
+
+            SHFILEINFOW sfi = {};
+            ui.smallIcons = reinterpret_cast<HIMAGELIST>(
+                SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi),
+                               SHGFI_SYSICONINDEX | SHGFI_SMALLICON));
+            if (ui.smallIcons) {
+                ListView_SetImageList(ui.listView, ui.smallIcons, LVSIL_SMALL);
+            }
 
             LVCOLUMNW column = {};
             column.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -394,13 +454,35 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             column.cx = 120;
             ListView_InsertColumn(ui.listView, 2, &column);
 
+            ui.statusBar = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr,
+                                           WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
+                                           0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
+            int parts[2] = { rect.right - 200, -1 };
+            SendMessageW(ui.statusBar, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
+
+            SendMessageW(ui.pathEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(refreshButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(applyButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(openButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(deleteButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(upButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(ui.listView, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(ui.statusBar, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+
             PopulateListView(ui, GetEditText(ui.pathEdit));
             return 0;
         }
         case WM_SIZE: {
             RECT rect;
             GetClientRect(hwnd, &rect);
-            SetWindowPos(ui.listView, nullptr, 10, 44, rect.right - 20, rect.bottom - 54, SWP_NOZORDER);
+            SendMessageW(ui.statusBar, WM_SIZE, 0, 0);
+            RECT statusRect;
+            GetWindowRect(ui.statusBar, &statusRect);
+            int statusHeight = statusRect.bottom - statusRect.top;
+            SetWindowPos(ui.listView, nullptr, 10, 44, rect.right - 20,
+                         rect.bottom - 54 - statusHeight, SWP_NOZORDER);
+            int parts[2] = { rect.right - 200, -1 };
+            SendMessageW(ui.statusBar, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
             return 0;
         }
         case WM_NOTIFY: {
@@ -436,6 +518,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         }
                         PopulateListView(ui, folder);
                     }
+                    return 0;
+                }
+                if (hdr->code == LVN_ITEMCHANGED) {
+                    UpdateStatusBar(ui);
                     return 0;
                 }
             }
@@ -505,6 +591,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         case WM_DESTROY:
             CleanupListViewItems(ui);
+            if (ui.uiFont) {
+                DeleteObject(ui.uiFont);
+            }
             PostQuitMessage(0);
             return 0;
         default:
