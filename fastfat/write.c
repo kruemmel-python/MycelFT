@@ -260,10 +260,11 @@ Return Value:
 
     BOOLEAN PostIrp = FALSE;
     BOOLEAN OplockPostIrp = FALSE;
-    BOOLEAN ExtendingFile = FALSE;
-    BOOLEAN FcbOrDcbAcquired = FALSE;
-    BOOLEAN SwitchBackToAsync = FALSE;
-    BOOLEAN CalledByLazyWriter = FALSE;
+    // we do not unmap it on the way out.
+    //
+
+    PVOID SystemBuffer = (PVOID) NULL;
+    BOOLEAN CryptoApplied = FALSE;
     BOOLEAN ExtendingValidData = FALSE;
     BOOLEAN FcbAcquiredExclusive = FALSE;
     BOOLEAN FcbCanDemoteToShared = FALSE;
@@ -2438,22 +2439,55 @@ Return Value:
                 // must zero the data in between.
                 //
 
-                if ( StartingVbo > ValidDataToCheck ) {
-
-                    //
-                    // Call the Cache Manager to zero the data.
+                    //  Get hold of the user's buffer.
                     //
 
-                    if (!FatZeroData( IrpContext,
-                                      Vcb,
-                                      FileObject,
-                                      ValidDataToCheck,
-                                      StartingVbo - ValidDataToCheck )) {
+                    SystemBuffer = FatMapUserBuffer( IrpContext, Irp );
 
-                        DebugTrace( 0, Dbg, "Cached Write could not wait to zero\n", 0 );
+                    if (MyceliaFtShouldEncryptWrite( TypeOfOpen,
+                                                     PagingIo,
+                                                     NonCachedIo,
+                                                     Wait )) {
+
+                        Status = MyceliaFtProcessBuffer( Vcb,
+                                                         StartingByte,
+                                                         (PUCHAR)SystemBuffer,
+                                                         ByteCount );
+
+                        if (!NT_SUCCESS( Status )) {
+                            try_return( Status );
+                        }
+
+                        CryptoApplied = TRUE;
+                    }
+
+                    //
+                    // Do the write, possibly writing through
+                    //
+
+                        DebugTrace( 0, Dbg, "Cached Write could not wait\n", 0 );
+
+                        if (CryptoApplied) {
+                            (VOID)MyceliaFtProcessBuffer( Vcb,
+                                                          StartingByte,
+                                                          (PUCHAR)SystemBuffer,
+                                                          ByteCount );
+                            CryptoApplied = FALSE;
+                        }
 
                         try_return( PostIrp = TRUE );
                     }
+
+                    if (CryptoApplied) {
+                        (VOID)MyceliaFtProcessBuffer( Vcb,
+                                                      StartingByte,
+                                                      (PUCHAR)SystemBuffer,
+                                                      ByteCount );
+                        CryptoApplied = FALSE;
+                    }
+
+                    Irp->IoStatus.Status = STATUS_SUCCESS;
+                    Irp->IoStatus.Information = ByteCount;
                 }
 
                 WriteFileSizeToDirent = BooleanFlagOn(IrpContext->Flags,

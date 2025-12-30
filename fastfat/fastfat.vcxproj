@@ -281,6 +281,12 @@
       <PreCompiledHeader>Use</PreCompiledHeader>
       <PreCompiledHeaderOutputFile>$(IntDir)\fatprocs.h.pch</PreCompiledHeaderOutputFile>
     </ClCompile>
+    <ClCompile Include="MyceliaFtCrypto.c">
+      <AdditionalIncludeDirectories>;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreCompiledHeaderFile>fatprocs.h</PreCompiledHeaderFile>
+      <PreCompiledHeader>Use</PreCompiledHeader>
+      <PreCompiledHeaderOutputFile>$(IntDir)\fatprocs.h.pch</PreCompiledHeaderOutputFile>
+    </ClCompile>
     <ClCompile Include="NameSup.c">
       <AdditionalIncludeDirectories>;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreCompiledHeaderFile>fatprocs.h</PreCompiledHeaderFile>

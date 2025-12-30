@@ -39,6 +39,7 @@ Abstract:
 #include "Lfn.h"
 #include "FatStruc.h"
 #include "FatData.h"
+#include "myceliaft_crypto.h"
 
 
 
