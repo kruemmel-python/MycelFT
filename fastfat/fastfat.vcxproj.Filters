@@ -85,6 +85,9 @@
     <ClCompile Include="LockCtrl.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MyceliaFtCrypto.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="NameSup.c">
       <Filter>Source Files</Filter>
     </ClCompile>

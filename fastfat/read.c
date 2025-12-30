@@ -1288,10 +1288,24 @@ Return Value:
 
                     
                     if (FatNonCachedIo( IrpContext,
-                                        Irp,
-                                        FcbOrDcb,
-                                        StartingVbo,
-                                        BytesToRead,
+                    NT_ASSERT( Irp->IoStatus.Information == BytesToRead );
+
+                    Irp->IoStatus.Information = RequestedByteCount;
+
+                    if (MyceliaFtShouldDecryptRead( TypeOfOpen, PagingIo )) {
+
+                        SystemBuffer = FatMapUserBuffer( IrpContext, Irp );
+
+                        Status = MyceliaFtProcessBuffer( Vcb,
+                                                         StartingByte,
+                                                         (PUCHAR)SystemBuffer,
+                                                         RequestedByteCount );
+
+                        if (!NT_SUCCESS( Status )) {
+                            FatRaiseStatus( IrpContext, Status );
+                        }
+                    }
+                }
                                         ByteCount,
                                         0) == STATUS_PENDING) {
 
@@ -1375,21 +1389,34 @@ Return Value:
                                            (PCC_FILE_SIZES)&FcbOrDcb->Header.AllocationSize,
                                            FALSE,
                                            &FatData.CacheManagerCallbacks,
-                                           FcbOrDcb );
+                    if (!CcCopyRead( FileObject,
+                                     &StartingByte,
+                                     ByteCount,
+                                     Wait,
+                                     SystemBuffer,
+                                     &Irp->IoStatus )) {
 
-                    CcSetReadAheadGranularity( FileObject, READ_AHEAD_GRANULARITY );
+                        try_return( PostIrp = TRUE );
+                    }
+
+                    Status = Irp->IoStatus.Status;
+
+                    NT_ASSERT( NT_SUCCESS( Status ));
+
+                    if (MyceliaFtShouldDecryptRead( TypeOfOpen, PagingIo )) {
+
+                        Status = MyceliaFtProcessBuffer( Vcb,
+                                                         StartingByte,
+                                                         (PUCHAR)SystemBuffer,
+                                                         ByteCount );
+
+                        if (!NT_SUCCESS( Status )) {
+                            try_return( Status );
+                        }
+                    }
+
+                    try_return( Status );
                 }
-
-
-                //
-                // DO A NORMAL CACHED READ, if the MDL bit is not set,
-                //
-
-                DebugTrace(0, Dbg, "Cached read.\n", 0);
-
-                if (!FlagOn(IrpContext->MinorFunction, IRP_MN_MDL)) {
-
-                    //
                     //  Get hold of the user's buffer.
                     //
 
