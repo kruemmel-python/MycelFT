@@ -23,12 +23,13 @@ cd build-gpp
 g++ -std=c++17 -O2 -municode -DUNICODE -D_UNICODE \
   ../MycelFTExplorer.cpp \
   -o MycelFTExplorer.exe \
-  -lcomctl32
+  -lcomctl32 -luxtheme
 ```
 
 ### Hinweise
 - `-municode` sorgt für einen Unicode-Entry-Point (`wWinMain`).
 - `-lcomctl32` ist erforderlich für den ListView-Container.
+- `-luxtheme` ist erforderlich für `SetWindowTheme` (Explorer-Style).
 
 ## 3) Ausführen
 

@@ -2,6 +2,7 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <uxtheme.h>
 #include <stdint.h>
 #include <cmath>
 #include <string>
@@ -223,6 +224,7 @@ struct ItemInfo {
 };
 
 void CleanupListViewItems(const UiState& ui);
+void UpdateStatusBar(const UiState& ui);
 
 std::wstring FormatSize(uint64_t size) {
     wchar_t buffer[64] = {};
