@@ -167,14 +167,20 @@ bool ReadAdsData(const std::wstring& path,
                  const std::wstring& streamName,
                  std::vector<uint8_t>& data,
                  bool& exists,
+                 bool& adsSupported,
                  std::wstring& error) {
     exists = false;
+    adsSupported = true;
     std::wstring streamPath = AdsPath(path, streamName);
     HANDLE stream = CreateFileW(streamPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (stream == INVALID_HANDLE_VALUE) {
         DWORD lastError = GetLastError();
         if (lastError == ERROR_FILE_NOT_FOUND || lastError == ERROR_PATH_NOT_FOUND) {
+            return true;
+        }
+        if (lastError == ERROR_INVALID_NAME || lastError == ERROR_NOT_SUPPORTED) {
+            adsSupported = false;
             return true;
         }
         error = L"Konnte HMAC-Stream nicht öffnen.";
@@ -205,11 +211,19 @@ bool ReadAdsData(const std::wstring& path,
 bool WriteAdsData(const std::wstring& path,
                   const std::wstring& streamName,
                   const std::vector<uint8_t>& data,
+                  bool adsSupported,
                   std::wstring& error) {
+    if (!adsSupported) {
+        return true;
+    }
     std::wstring streamPath = AdsPath(path, streamName);
     HANDLE stream = CreateFileW(streamPath.c_str(), GENERIC_WRITE, 0, nullptr,
                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (stream == INVALID_HANDLE_VALUE) {
+        DWORD lastError = GetLastError();
+        if (lastError == ERROR_INVALID_NAME || lastError == ERROR_NOT_SUPPORTED) {
+            return true;
+        }
         error = L"Konnte HMAC-Stream nicht schreiben.";
         return false;
     }
@@ -227,7 +241,10 @@ bool WriteAdsData(const std::wstring& path,
     return true;
 }
 
-void DeleteAdsData(const std::wstring& path, const std::wstring& streamName) {
+void DeleteAdsData(const std::wstring& path, const std::wstring& streamName, bool adsSupported) {
+    if (!adsSupported) {
+        return;
+    }
     std::wstring streamPath = AdsPath(path, streamName);
     DeleteFileW(streamPath.c_str());
 }
@@ -430,12 +447,13 @@ bool TransformFile(const std::wstring& path, std::wstring& error) {
     uint64_t seed = MycelSeedForPath(path);
     std::vector<uint8_t> storedHmac;
     bool hasHmac = false;
-    if (!ReadAdsData(path, kHmacStreamName, storedHmac, hasHmac, error)) {
+    bool adsSupported = true;
+    if (!ReadAdsData(path, kHmacStreamName, storedHmac, hasHmac, adsSupported, error)) {
         CloseHandle(file);
         return false;
     }
 
-    if (hasHmac) {
+    if (adsSupported && hasHmac) {
         if (storedHmac.size() != kHmacSize) {
             CloseHandle(file);
             error = L"HMAC-Stream hat ungültige Länge.";
@@ -464,22 +482,25 @@ bool TransformFile(const std::wstring& path, std::wstring& error) {
             return false;
         }
 
-        DeleteAdsData(path, kHmacStreamName);
+        DeleteAdsData(path, kHmacStreamName, adsSupported);
     } else {
         std::vector<uint8_t> computedHmac;
+        bool computeHmac = adsSupported;
         if (!TransformFilePass(file,
                                seed,
                                static_cast<uint64_t>(fileSize.QuadPart),
-                               true,
-                               &computedHmac,
+                               computeHmac,
+                               computeHmac ? &computedHmac : nullptr,
                                error)) {
             CloseHandle(file);
             return false;
         }
 
-        if (!WriteAdsData(path, kHmacStreamName, computedHmac, error)) {
-            CloseHandle(file);
-            return false;
+        if (computeHmac) {
+            if (!WriteAdsData(path, kHmacStreamName, computedHmac, adsSupported, error)) {
+                CloseHandle(file);
+                return false;
+            }
         }
     }
 
