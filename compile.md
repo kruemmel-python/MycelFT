@@ -45,8 +45,20 @@ Der Explorer liegt unter `mycelft_explorer/` und ist eine eigenständige Win32-G
 
 4. **Binary finden**
    ```text
-   build-explorer/Release/MycelFTExplorer.exe
-   ```
+    build-explorer/Release/MycelFTExplorer.exe
+    ```
+
+### Alternative: g++ (Konsole)
+
+Für eine reine Konsolen-Build-Variante (MinGW/MSYS2) siehe auch
+`mycelft_explorer/compile.md`. Kurzfassung:
+
+```bash
+g++ -std=c++17 -O2 -municode -DUNICODE -D_UNICODE \
+  mycelft_explorer/MycelFTExplorer.cpp \
+  -o MycelFTExplorer.exe \
+  -lcomctl32 -luxtheme -lgdi32 -lbcrypt -lshell32
+```
 
 ### Funktion des Explorers
 - Zeigt Dateien eines Ordners an (Standard: `C:\`).
