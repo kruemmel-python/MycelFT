@@ -1134,13 +1134,25 @@ typedef struct _FCB {
 
     //
     //  If the UNICODE Lfn is fully expressible in the system Oem code
-    //  page, then we will store it in a prefix table, otherwise we will
-    //  store the last UNICODE name in the Fcb.  In both cases the name
-    //  has been upcased.
+    //  Defragmentation / ReallocateOnWrite synchronization object.  This
+    //  is filled in by FatMoveFile() and affects the read and write paths.
     //
-    //  Note that we may need neither of these fields if an LFN was strict
-    //  8.3 or differed only in case.  Indeed if there wasn't an LFN, we
-    //  don't need them at all.
+
+    PKEVENT MoveFileEvent;
+
+    //
+    //  MycelFT extension
+    //
+    //  Stores the per-file "genetic" seed.
+    //
+    UINT64 MycelBioSeed;
+
+    //
+    //  Indicates whether this file is actively protected by MycelFT.
+    //
+    BOOLEAN IsMycelActive;
+
+} FCB, *PFCB;
     //
 
     union {

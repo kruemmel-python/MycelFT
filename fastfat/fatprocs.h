@@ -2989,9 +2989,31 @@ FatInterpretClusterType (
     ((ParentDcb) ? ((NodeType(ParentDcb) != FAT_NTC_ROOT_DCB || FatIsFat32((ParentDcb)->Vcb)) ?     \
                   FatGetLboFromIndex( (ParentDcb)->Vcb,                                             \
                                       (ParentDcb)->FirstClusterOfFile ) :                           \
-                  (ParentDcb)->Vcb->AllocationSupport.RootDirectoryLbo) +                           \
-                 (DirentOffset)                                                                     \
-                  :                                                                                 \
+#define IsDirectory(FcbOrDcb) ((NodeType((FcbOrDcb)) == FAT_NTC_DCB) || (NodeType((FcbOrDcb)) == FAT_NTC_ROOT_DCB))
+
+//
+//  MycelFT Core Routines (in DevIoSup.c)
+//
+
+NTSTATUS
+FatMycelLowLevelReadWrite (
+    IN PIRP_CONTEXT IrpContext,
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp,
+    IN PVCB Vcb
+    );
+
+//
+//  Hook: replace the direct IoCallDriver path with MycelFT.
+//
+
+#undef FatLowLevelReadWrite
+#define FatLowLevelReadWrite(IRPCONTEXT,DO,IRP,VCB) \
+    FatMycelLowLevelReadWrite((IRPCONTEXT),(DO),(IRP),(VCB))
+
+IO_COMPLETION_ROUTINE FatHijackCompletionRoutine;
+
+#endif // _FATPROCS_
                  0)
 
 //
