@@ -152,6 +152,7 @@ uint64_t MycelSeedForPath(const std::wstring& path) {
 
 constexpr size_t kHmacSize = 32;
 const wchar_t* kHmacStreamName = L"mycelft.hmac";
+const wchar_t* kHmacSidecarSuffix = L".mycelft.hmac";
 
 bool SeekFile(HANDLE file, uint64_t offset) {
     LARGE_INTEGER seekPos = {};
@@ -161,6 +162,70 @@ bool SeekFile(HANDLE file, uint64_t offset) {
 
 std::wstring AdsPath(const std::wstring& path, const std::wstring& streamName) {
     return path + L":" + streamName;
+}
+
+std::wstring SidecarPath(const std::wstring& path) {
+    return path + kHmacSidecarSuffix;
+}
+
+bool ReadFileData(const std::wstring& path,
+                  std::vector<uint8_t>& data,
+                  bool& exists,
+                  std::wstring& error) {
+    exists = false;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        DWORD lastError = GetLastError();
+        if (lastError == ERROR_FILE_NOT_FOUND || lastError == ERROR_PATH_NOT_FOUND) {
+            return true;
+        }
+        error = L"Konnte Integritätsdatei nicht öffnen.";
+        return false;
+    }
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size)) {
+        CloseHandle(file);
+        error = L"Konnte Integritätsdatei nicht lesen.";
+        return false;
+    }
+
+    data.resize(static_cast<size_t>(size.QuadPart));
+    DWORD bytesRead = 0;
+    if (size.QuadPart > 0 &&
+        !ReadFile(file, data.data(), static_cast<DWORD>(data.size()), &bytesRead, nullptr)) {
+        CloseHandle(file);
+        error = L"Konnte Integritätsdatei nicht lesen.";
+        return false;
+    }
+
+    CloseHandle(file);
+    exists = true;
+    return true;
+}
+
+bool WriteFileData(const std::wstring& path,
+                   const std::vector<uint8_t>& data,
+                   std::wstring& error) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        error = L"Konnte Integritätsdatei nicht schreiben.";
+        return false;
+    }
+
+    DWORD bytesWritten = 0;
+    if (!data.empty() &&
+        (!WriteFile(file, data.data(), static_cast<DWORD>(data.size()), &bytesWritten, nullptr) ||
+         bytesWritten != data.size())) {
+        CloseHandle(file);
+        error = L"Konnte Integritätsdatei nicht schreiben.";
+        return false;
+    }
+
+    CloseHandle(file);
+    return true;
 }
 
 bool ReadAdsData(const std::wstring& path,
@@ -181,7 +246,7 @@ bool ReadAdsData(const std::wstring& path,
         }
         if (lastError == ERROR_INVALID_NAME || lastError == ERROR_NOT_SUPPORTED) {
             adsSupported = false;
-            return true;
+            return ReadFileData(SidecarPath(path), data, exists, error);
         }
         error = L"Konnte HMAC-Stream nicht öffnen.";
         return false;
@@ -214,7 +279,7 @@ bool WriteAdsData(const std::wstring& path,
                   bool adsSupported,
                   std::wstring& error) {
     if (!adsSupported) {
-        return true;
+        return WriteFileData(SidecarPath(path), data, error);
     }
     std::wstring streamPath = AdsPath(path, streamName);
     HANDLE stream = CreateFileW(streamPath.c_str(), GENERIC_WRITE, 0, nullptr,
@@ -222,7 +287,7 @@ bool WriteAdsData(const std::wstring& path,
     if (stream == INVALID_HANDLE_VALUE) {
         DWORD lastError = GetLastError();
         if (lastError == ERROR_INVALID_NAME || lastError == ERROR_NOT_SUPPORTED) {
-            return true;
+            return WriteFileData(SidecarPath(path), data, error);
         }
         error = L"Konnte HMAC-Stream nicht schreiben.";
         return false;
@@ -243,6 +308,7 @@ bool WriteAdsData(const std::wstring& path,
 
 void DeleteAdsData(const std::wstring& path, const std::wstring& streamName, bool adsSupported) {
     if (!adsSupported) {
+        DeleteFileW(SidecarPath(path).c_str());
         return;
     }
     std::wstring streamPath = AdsPath(path, streamName);
@@ -544,6 +610,12 @@ void ProcessFolderRecursive(const std::wstring& folder,
                 ProcessFolderRecursive(itemPath, processed, failed, lastError);
             }
             continue;
+        }
+        if (itemPath.size() >= wcslen(kHmacSidecarSuffix)) {
+            std::wstring suffix = itemPath.substr(itemPath.size() - wcslen(kHmacSidecarSuffix));
+            if (_wcsicmp(suffix.c_str(), kHmacSidecarSuffix) == 0) {
+                continue;
+            }
         }
 
         std::wstring error;
