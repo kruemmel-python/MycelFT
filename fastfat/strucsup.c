@@ -1444,16 +1444,41 @@ Return Value:
             if (((PUSHORT)Dirent)[8] != 0) {
 
                 Fcb->CreationTime =
-                    FatFatTimeToNtTime( IrpContext,
-                                        Dirent->CreationTime,
-                                        Dirent->CreationMSec );
+        //  Initialize the Mcb
+        //
 
-            } else {
+        FsRtlInitializeLargeMcb( &Fcb->Mcb, PoolType );
+        UnwindMcb = &Fcb->Mcb;
 
-                Fcb->CreationTime = FatSystemJanOne1980;
+        //
+        //  MycelFT initialization
+        //
+
+        Fcb->IsMycelActive = TRUE;
+
+        {
+            ULONG SeedHash = 0;
+            PUNICODE_STRING NameToHash = NULL;
+            ULONG i;
+
+            if (Vcb && Vcb->Vpb) {
+                SeedHash ^= Vcb->Vpb->SerialNumber;
             }
+
+            NameToHash = (Lfn && Lfn->Length > 0) ? Lfn : &Fcb->ShortName.Name.Unicode;
+            if (NameToHash && NameToHash->Buffer) {
+                for (i = 0; i < (NameToHash->Length / sizeof(WCHAR)); i++) {
+                    SeedHash = (SeedHash * 31) + NameToHash->Buffer[i];
+                }
+            }
+
+            Fcb->MycelBioSeed = ((UINT64)SeedHash) * 0x9E3779B97F4A7C15ULL;
         }
 
+        //
+        //  Set the file size, valid data length, first cluster of file,
+        //  and allocation size based on the information stored in the dirent
+        //
         //
         //  Initialize Advanced FCB Header fields
         //

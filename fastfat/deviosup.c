@@ -14,6 +14,7 @@ Abstract:
 --*/
 
 #include "FatProcs.h"
+#include <math.h>
 
 //
 //  The Bug check file id for this module
@@ -59,6 +60,331 @@ typedef struct _FAT_SYNC_CONTEXT {
     KEVENT Event;
 
 } FAT_SYNC_CONTEXT, *PFAT_SYNC_CONTEXT;
+
+//
+//  MycelFT CPU core helpers (in-memory simulation)
+//
+
+#define MYCEL_GRID_W 16
+#define MYCEL_GRID_H 16
+#define MYCEL_GRID_SIZE (MYCEL_GRID_W * MYCEL_GRID_H)
+
+static
+__inline
+UINT64
+FatMycelNextRand (
+    _Inout_ UINT64 *State
+    )
+{
+    UINT64 x = *State;
+
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+
+    *State = x;
+
+    return x;
+}
+
+static
+__inline
+float
+FatMycelFloatRand (
+    _Inout_ UINT64 *State
+    )
+{
+    return (float)(FatMycelNextRand( State ) & 0xFFFF) / 65536.0f;
+}
+
+static
+__inline
+float
+FatMycelSample (
+    _In_reads_(MYCEL_GRID_SIZE) float *Grid,
+    _In_ int X,
+    _In_ int Y
+    )
+{
+    X = X % MYCEL_GRID_W;
+    if (X < 0) {
+        X += MYCEL_GRID_W;
+    }
+
+    Y = Y % MYCEL_GRID_H;
+    if (Y < 0) {
+        Y += MYCEL_GRID_H;
+    }
+
+    return Grid[(Y * MYCEL_GRID_W) + X];
+}
+
+static
+__inline
+float
+FatMycelLaplace (
+    _In_reads_(MYCEL_GRID_SIZE) float *Grid,
+    _In_ int X,
+    _In_ int Y
+    )
+{
+    float c = FatMycelSample( Grid, X, Y );
+    float u = FatMycelSample( Grid, X, Y - 1 );
+    float d = FatMycelSample( Grid, X, Y + 1 );
+    float l = FatMycelSample( Grid, X - 1, Y );
+    float r = FatMycelSample( Grid, X + 1, Y );
+
+    return (u + d + l + r - (4.0f * c));
+}
+
+static
+VOID
+FatMycelGenerateKeyBlock (
+    _In_ UINT64 BioSeed,
+    _In_ ULONGLONG BlockIndex,
+    _Out_writes_(BufferSize) PUCHAR KeyBuffer,
+    _In_ ULONG BufferSize
+    )
+{
+    float Energy[MYCEL_GRID_SIZE];
+    float Phase[MYCEL_GRID_SIZE];
+    float NextEnergy[MYCEL_GRID_SIZE];
+    UINT64 RngState = BioSeed ^ (BlockIndex * 0x9E3779B97F4A7C15ULL);
+    int Step;
+    int X;
+    int Y;
+    int Index;
+    const int SimSteps = 4;
+
+    for (Index = 0; Index < MYCEL_GRID_SIZE; Index++) {
+        Energy[Index] = FatMycelFloatRand( &RngState );
+        Phase[Index] = FatMycelFloatRand( &RngState ) * 6.2831853f;
+    }
+
+    for (Step = 0; Step < SimSteps; Step++) {
+        for (Y = 0; Y < MYCEL_GRID_H; Y++) {
+            for (X = 0; X < MYCEL_GRID_W; X++) {
+                int CellIndex = (Y * MYCEL_GRID_W) + X;
+                float Lap = FatMycelLaplace( Energy, X, Y );
+                float Noise = (FatMycelFloatRand( &RngState ) - 0.5f) * 0.1f;
+                float dE = (0.2f * Lap) + Noise + (0.05f * sinf( Phase[CellIndex] ));
+                float Value = Energy[CellIndex] + dE;
+
+                if (Value < 0.0f) {
+                    Value = 0.0f;
+                } else if (Value > 1.0f) {
+                    Value = 1.0f;
+                }
+
+                NextEnergy[CellIndex] = Value;
+            }
+        }
+
+        RtlCopyMemory( Energy, NextEnergy, sizeof( Energy ) );
+    }
+
+    for (Index = 0; Index < (int)BufferSize; Index++) {
+        union {
+            float f;
+            UINT32 u;
+        } conv;
+        UINT32 hash;
+
+        conv.f = Energy[Index % MYCEL_GRID_SIZE];
+        hash = (conv.u ^ (conv.u >> 16)) * 0x45d9f3b;
+        KeyBuffer[Index] = (UCHAR)(hash & 0xFF);
+    }
+}
+
+static
+VOID
+FatMycelProcessBuffer (
+    _Inout_updates_(Length) PUCHAR Buffer,
+    _In_ ULONG Length,
+    _In_ UINT64 BioSeed,
+    _In_ ULONGLONG StreamOffset
+    )
+{
+    KFLOATING_SAVE FloatSave;
+    NTSTATUS Status;
+    ULONG Offset = 0;
+    UCHAR KeyBlock[MYCEL_GRID_SIZE];
+
+    if (Length == 0) {
+        return;
+    }
+
+    Status = KeSaveFloatingPointState( &FloatSave );
+    if (!NT_SUCCESS( Status )) {
+        return;
+    }
+
+    while (Offset < Length) {
+        ULONGLONG AbsPos = StreamOffset + Offset;
+        ULONGLONG BlockIndex = AbsPos / MYCEL_GRID_SIZE;
+        ULONG BlockOffset = (ULONG)(AbsPos % MYCEL_GRID_SIZE);
+        ULONG BytesToProcess = MYCEL_GRID_SIZE - BlockOffset;
+        ULONG k;
+
+        if (BytesToProcess > (Length - Offset)) {
+            BytesToProcess = Length - Offset;
+        }
+
+        FatMycelGenerateKeyBlock( BioSeed, BlockIndex, KeyBlock, MYCEL_GRID_SIZE );
+
+        for (k = 0; k < BytesToProcess; k++) {
+            Buffer[Offset + k] ^= KeyBlock[BlockOffset + k];
+        }
+
+        Offset += BytesToProcess;
+    }
+
+    KeRestoreFloatingPointState( &FloatSave );
+}
+
+NTSTATUS
+FatMycelLowLevelReadWrite (
+    IN PIRP_CONTEXT IrpContext,
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp,
+    IN PVCB Vcb
+    )
+{
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( Irp );
+    PFILE_OBJECT FileObject = IrpSp->FileObject;
+    TYPE_OF_OPEN TypeOfOpen;
+    PFCB Fcb;
+    PCCB Ccb;
+    PVCB DecodeVcb;
+    PVOID SystemBuffer = NULL;
+    ULONG Length = 0;
+    LARGE_INTEGER ByteOffset = {0};
+
+    UNREFERENCED_PARAMETER( Vcb );
+    UNREFERENCED_PARAMETER( Ccb );
+    UNREFERENCED_PARAMETER( DecodeVcb );
+
+    if (FileObject == NULL) {
+        return IoCallDriver( DeviceObject, Irp );
+    }
+
+    TypeOfOpen = FatDecodeFileObject( FileObject, &DecodeVcb, &Fcb, &Ccb );
+
+    if (TypeOfOpen != UserFileOpen || Fcb == NULL || !Fcb->IsMycelActive) {
+        return IoCallDriver( DeviceObject, Irp );
+    }
+
+    if (IrpSp->MajorFunction == IRP_MJ_READ) {
+        Length = IrpSp->Parameters.Read.Length;
+        ByteOffset = IrpSp->Parameters.Read.ByteOffset;
+    } else if (IrpSp->MajorFunction == IRP_MJ_WRITE) {
+        Length = IrpSp->Parameters.Write.Length;
+        ByteOffset = IrpSp->Parameters.Write.ByteOffset;
+    } else {
+        return IoCallDriver( DeviceObject, Irp );
+    }
+
+    if (Length == 0) {
+        return IoCallDriver( DeviceObject, Irp );
+    }
+
+    if (Irp->MdlAddress) {
+        SystemBuffer = MmGetSystemAddressForMdlSafe( Irp->MdlAddress,
+                                                     NormalPagePriority | MdlMappingNoExecute );
+    } else if (Irp->AssociatedIrp.SystemBuffer) {
+        SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
+    } else {
+        SystemBuffer = Irp->UserBuffer;
+    }
+
+    if (SystemBuffer == NULL) {
+        FatRaiseStatus( IrpContext, STATUS_INSUFFICIENT_RESOURCES );
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (IrpSp->MajorFunction == IRP_MJ_WRITE) {
+        PVOID EncBuffer;
+        PMDL NewMdl;
+        PMDL OldMdl;
+        KEVENT Event;
+        NTSTATUS Status;
+
+        EncBuffer = FsRtlAllocatePoolWithTag( NonPagedPoolNx, Length, 'cymF' );
+        if (EncBuffer == NULL) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        RtlCopyMemory( EncBuffer, SystemBuffer, Length );
+        FatMycelProcessBuffer( (PUCHAR)EncBuffer,
+                               Length,
+                               Fcb->MycelBioSeed,
+                               (ULONGLONG)ByteOffset.QuadPart );
+
+        NewMdl = IoAllocateMdl( EncBuffer, Length, FALSE, FALSE, NULL );
+        if (NewMdl == NULL) {
+            ExFreePool( EncBuffer );
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        MmBuildMdlForNonPagedPool( NewMdl );
+
+        OldMdl = Irp->MdlAddress;
+        Irp->MdlAddress = NewMdl;
+
+        KeInitializeEvent( &Event, NotificationEvent, FALSE );
+        IoCopyCurrentIrpStackLocationToNext( Irp );
+        IoSetCompletionRoutine( Irp,
+                                FatHijackCompletionRoutine,
+                                &Event,
+                                TRUE,
+                                TRUE,
+                                TRUE );
+
+        Status = IoCallDriver( DeviceObject, Irp );
+        if (Status == STATUS_PENDING) {
+            KeWaitForSingleObject( &Event, Executive, KernelMode, FALSE, NULL );
+            Status = Irp->IoStatus.Status;
+        }
+
+        Irp->MdlAddress = OldMdl;
+        IoFreeMdl( NewMdl );
+        ExFreePool( EncBuffer );
+
+        IoCompleteRequest( Irp, IO_NO_INCREMENT );
+        return Status;
+    }
+
+    if (IrpSp->MajorFunction == IRP_MJ_READ) {
+        KEVENT Event;
+        NTSTATUS Status;
+
+        KeInitializeEvent( &Event, NotificationEvent, FALSE );
+        IoCopyCurrentIrpStackLocationToNext( Irp );
+        IoSetCompletionRoutine( Irp,
+                                FatHijackCompletionRoutine,
+                                &Event,
+                                TRUE,
+                                TRUE,
+                                TRUE );
+
+        Status = IoCallDriver( DeviceObject, Irp );
+        if (Status == STATUS_PENDING) {
+            KeWaitForSingleObject( &Event, Executive, KernelMode, FALSE, NULL );
+            Status = Irp->IoStatus.Status;
+        }
+
+        if (NT_SUCCESS( Status )) {
+            FatMycelProcessBuffer( (PUCHAR)SystemBuffer,
+                                   (ULONG)Irp->IoStatus.Information,
+                                   Fcb->MycelBioSeed,
+                                   (ULONGLONG)ByteOffset.QuadPart );
+        }
+
+        IoCompleteRequest( Irp, IO_NO_INCREMENT );
+        return Status;
+    }
+
+    return IoCallDriver( DeviceObject, Irp );
+}
 
 
 //
@@ -137,25 +463,6 @@ FatSingleNonAlignedSync (
     IN ULONG ByteCount,
     IN PIRP Irp
     );
-
-//
-//  The following macro decides whether to send a request directly to
-//  the device driver, or to other routines.  It was meant to
-//  replace IoCallDriver as transparently as possible.  It must only be
-//  called with a read or write Irp.
-//
-//  NTSTATUS
-//  FatLowLevelReadWrite (
-//      PIRP_CONTEXT IrpContext,
-//      PDEVICE_OBJECT DeviceObject,
-//      PIRP Irp,
-//      PVCB Vcb
-//      );
-//
-
-#define FatLowLevelReadWrite(IRPCONTEXT,DO,IRP,VCB) ( \
-    IoCallDriver((DO),(IRP))                          \
-)
 
 //
 //  The following macro handles completion-time zeroing of buffers.
