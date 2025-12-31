@@ -151,7 +151,7 @@ MycelFT richtet sich an Anwender und Entwickler, die:
 - Explorer-Tool (User-Mode): ✔️  
 - Integrität (HMAC): ✔️  
 - ADS + Sidecar-Fallback: ✔️  
-- Kernel-Integration (Minifilter): geplant
+
 
 ---
 
