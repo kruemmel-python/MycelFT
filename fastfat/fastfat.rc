@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 //
 //    Copyright (C) Microsoft.  All rights reserved.
 //
@@ -13,19 +12,3 @@
 #define VER_ORIGINALFILENAME_STR    "FastFAT.Sys"
 
 #include "common.ver"
-=======
-//
-//    Copyright (C) Microsoft.  All rights reserved.
-//
-#include <windows.h>
-
-#include <ntverp.h>
-
-#define VER_FILETYPE    VFT_DRV
-#define VER_FILESUBTYPE VFT2_DRV_SYSTEM
-#define VER_FILEDESCRIPTION_STR     "Fast FAT File System Driver"
-#define VER_INTERNALNAME_STR        "fastfat.sys"
-#define VER_ORIGINALFILENAME_STR    "FastFAT.Sys"
-
-#include "common.ver"
->>>>>>> e3383dd3e7594e09d975d2a3f4614aa1ecf1f046
