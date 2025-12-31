@@ -1,44 +1,3 @@
-=====================================================================
-// ============================================================================
-//
-//                      Stack Swapping Support
-//
-// ============================================================================
-// ============================================================================
-
-//
-//  This structure is used when doing a callout on a new stack.
-//  It contains the parameters for various functions and a place
-//  to store the return code.
-//
-
-typedef struct _FAT_CALLOUT_PARAMETERS {
-
-    union {
-
-        //
-        //  Parameters for a create request via FatCommonCreate().
-        //
-
-        struct {
-
-            PIRP_CONTEXT IrpContext;
-            PIRP Irp;
-
-        } Create;
-
-    };
-
-    NTSTATUS IrpStatus;
-    NTSTATUS ExceptionStatus;
-
-} FAT_CALLOUT_PARAMETERS, *PFAT_CALLOUT_PARAMETERS;
-#endif
-
-#endif // _FATSTRUC_
-
-
-=======
 /*++
 
 Copyright (c) 1989-2000 Microsoft Corporation
@@ -1147,12 +1106,24 @@ typedef struct _FCB {
     //  fully qualified name.
     //
 
-    //  page, then we will store it in a prefix table, otherwise we will
-    //  store the last UNICODE name in the Fcb.  In both cases the name
-    //  has been upcased.
-    //  Note that we may need neither of these fields if an LFN was strict
-    //  8.3 or differed only in case.  Indeed if there wasn't an LFN, we
-    //  don't need them at all.
+    //  Defragmentation / ReallocateOnWrite synchronization object.  This
+    //  is filled in by FatMoveFile() and affects the read and write paths.
+    //
+
+    PKEVENT MoveFileEvent;
+
+    //
+    //  MycelFT extension
+    //  Stores the per-file "genetic" seed.
+    //
+    UINT64 MycelBioSeed;
+
+    //
+    //  Indicates whether this file is actively protected by MycelFT.
+    //
+    BOOLEAN IsMycelActive;
+
+} FCB, *PFCB;
     UCHAR DirentFatFlags;
 
     //
@@ -1752,46 +1723,7 @@ typedef struct _EA_RANGE {
     PCHAR Data;
     ULONG StartingVbo;
     ULONG Length;
-// ============================================================================
-// ============================================================================
-//
-//                      Stack Swapping Support
-//
-// ============================================================================
-// ============================================================================
-
-//
-//  This structure is used when doing a callout on a new stack.
-//  It contains the parameters for various functions and a place
-//  to store the return code.
-//
-
-typedef struct _FAT_CALLOUT_PARAMETERS {
-
-    union {
-
-        //
-        //  Parameters for a create request via FatCommonCreate().
-        //
-
-        struct {
-
-            PIRP_CONTEXT IrpContext;
-            PIRP Irp;
-
-        } Create;
-
-    };
-
-    NTSTATUS IrpStatus;
-    NTSTATUS ExceptionStatus;
-
-} FAT_CALLOUT_PARAMETERS, *PFAT_CALLOUT_PARAMETERS;
-#endif
-
-#endif // _FATSTRUC_
-
-
+// 
 //
 // ============================================================================
 // ============================================================================
