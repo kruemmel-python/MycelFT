@@ -581,6 +581,16 @@ struct ProcessContext {
     bool processDrive = false;
 };
 
+constexpr UINT WM_MYCEL_PROGRESS = WM_APP + 10;
+constexpr UINT WM_MYCEL_DONE = WM_APP + 11;
+
+struct ProgressUpdate {
+    uint64_t processed = 0;
+    uint64_t failed = 0;
+    std::wstring current;
+    std::wstring lastError;
+};
+
 void SendProgressUpdate(HWND hwnd,
                         uint64_t processed,
                         uint64_t failed,
@@ -886,16 +896,6 @@ void SetUiBusy(const UiState& ui, bool busy) {
     EnableWindow(ui.pathEdit, !busy);
     EnableWindow(ui.listView, !busy);
 }
-
-constexpr UINT WM_MYCEL_PROGRESS = WM_APP + 10;
-constexpr UINT WM_MYCEL_DONE = WM_APP + 11;
-
-struct ProgressUpdate {
-    uint64_t processed = 0;
-    uint64_t failed = 0;
-    std::wstring current;
-    std::wstring lastError;
-};
 
 }  // namespace
 
