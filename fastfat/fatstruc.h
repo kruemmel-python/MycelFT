@@ -1,3 +1,44 @@
+=====================================================================
+// ============================================================================
+//
+//                      Stack Swapping Support
+//
+// ============================================================================
+// ============================================================================
+
+//
+//  This structure is used when doing a callout on a new stack.
+//  It contains the parameters for various functions and a place
+//  to store the return code.
+//
+
+typedef struct _FAT_CALLOUT_PARAMETERS {
+
+    union {
+
+        //
+        //  Parameters for a create request via FatCommonCreate().
+        //
+
+        struct {
+
+            PIRP_CONTEXT IrpContext;
+            PIRP Irp;
+
+        } Create;
+
+    };
+
+    NTSTATUS IrpStatus;
+    NTSTATUS ExceptionStatus;
+
+} FAT_CALLOUT_PARAMETERS, *PFAT_CALLOUT_PARAMETERS;
+#endif
+
+#endif // _FATSTRUC_
+
+
+=======
 /*++
 
 Copyright (c) 1989-2000 Microsoft Corporation
@@ -1106,24 +1147,12 @@ typedef struct _FCB {
     //  fully qualified name.
     //
 
-    FILE_NAME_NODE ShortName;
-
-    //
-    //  The following field is only filled in if it is needed with the user's
-    //  opened path
-    //
-
-    UNICODE_STRING FullFileName;
-
-    USHORT FinalNameLength;
-
-    //
-    //  To make life simpler we also keep in the Fcb/Dcb a current copy of
-    //  the fat attribute byte for the file/directory.  This field must
-    //  also be updated when we create the Fcb, modify the File, or verify
-    //  the Fcb
-    //
-
+    //  page, then we will store it in a prefix table, otherwise we will
+    //  store the last UNICODE name in the Fcb.  In both cases the name
+    //  has been upcased.
+    //  Note that we may need neither of these fields if an LFN was strict
+    //  8.3 or differed only in case.  Indeed if there wasn't an LFN, we
+    //  don't need them at all.
     UCHAR DirentFatFlags;
 
     //
@@ -1723,7 +1752,46 @@ typedef struct _EA_RANGE {
     PCHAR Data;
     ULONG StartingVbo;
     ULONG Length;
-// 
+// ============================================================================
+// ============================================================================
+//
+//                      Stack Swapping Support
+//
+// ============================================================================
+// ============================================================================
+
+//
+//  This structure is used when doing a callout on a new stack.
+//  It contains the parameters for various functions and a place
+//  to store the return code.
+//
+
+typedef struct _FAT_CALLOUT_PARAMETERS {
+
+    union {
+
+        //
+        //  Parameters for a create request via FatCommonCreate().
+        //
+
+        struct {
+
+            PIRP_CONTEXT IrpContext;
+            PIRP Irp;
+
+        } Create;
+
+    };
+
+    NTSTATUS IrpStatus;
+    NTSTATUS ExceptionStatus;
+
+} FAT_CALLOUT_PARAMETERS, *PFAT_CALLOUT_PARAMETERS;
+#endif
+
+#endif // _FATSTRUC_
+
+
 //
 // ============================================================================
 // ============================================================================
