@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <memory>
 
 namespace {
 
@@ -574,7 +575,27 @@ bool TransformFile(const std::wstring& path, std::wstring& error) {
     return true;
 }
 
+struct ProcessContext {
+    HWND hwnd = nullptr;
+    std::wstring root;
+    bool processDrive = false;
+};
+
+void SendProgressUpdate(HWND hwnd,
+                        uint64_t processed,
+                        uint64_t failed,
+                        const std::wstring& current,
+                        const std::wstring& lastError) {
+    ProgressUpdate* update = new ProgressUpdate();
+    update->processed = processed;
+    update->failed = failed;
+    update->current = current;
+    update->lastError = lastError;
+    PostMessageW(hwnd, WM_MYCEL_PROGRESS, 0, reinterpret_cast<LPARAM>(update));
+}
+
 void ProcessFolderRecursive(const std::wstring& folder,
+                            HWND hwnd,
                             uint64_t& processed,
                             uint64_t& failed,
                             std::wstring& lastError) {
@@ -607,7 +628,7 @@ void ProcessFolderRecursive(const std::wstring& folder,
 
         if (isDir) {
             if (!isReparse) {
-                ProcessFolderRecursive(itemPath, processed, failed, lastError);
+                ProcessFolderRecursive(itemPath, hwnd, processed, failed, lastError);
             }
             continue;
         }
@@ -619,6 +640,7 @@ void ProcessFolderRecursive(const std::wstring& folder,
         }
 
         std::wstring error;
+        SendProgressUpdate(hwnd, processed, failed, itemPath, lastError);
         if (TransformFile(itemPath, error)) {
             processed++;
         } else {
@@ -639,6 +661,20 @@ std::wstring RootFromPath(const std::wstring& path) {
     return L"C:\\";
 }
 
+DWORD WINAPI ProcessWorker(LPVOID param) {
+    std::unique_ptr<ProcessContext> context(reinterpret_cast<ProcessContext*>(param));
+    uint64_t processed = 0;
+    uint64_t failed = 0;
+    std::wstring lastError;
+    ProcessFolderRecursive(context->root, context->hwnd, processed, failed, lastError);
+    ProgressUpdate* finalUpdate = new ProgressUpdate();
+    finalUpdate->processed = processed;
+    finalUpdate->failed = failed;
+    finalUpdate->lastError = lastError;
+    PostMessageW(context->hwnd, WM_MYCEL_DONE, 0, reinterpret_cast<LPARAM>(finalUpdate));
+    return 0;
+}
+
 enum ControlId {
     kRefreshId = 1,
     kTransformId = 2,
@@ -654,8 +690,12 @@ struct UiState {
     HWND pathEdit = nullptr;
     HWND listView = nullptr;
     HWND statusBar = nullptr;
+    HWND progressBar = nullptr;
+    HWND logEdit = nullptr;
     HFONT uiFont = nullptr;
     HIMAGELIST smallIcons = nullptr;
+    HANDLE workerThread = nullptr;
+    bool isBusy = false;
 };
 
 struct ItemInfo {
@@ -832,6 +872,31 @@ void ShowMessage(HWND hwnd, const std::wstring& message) {
     MessageBoxW(hwnd, message.c_str(), L"MycelFT Explorer", MB_OK | MB_ICONINFORMATION);
 }
 
+void AppendLog(const UiState& ui, const std::wstring& message) {
+    if (!ui.logEdit) {
+        return;
+    }
+    int length = GetWindowTextLengthW(ui.logEdit);
+    SendMessageW(ui.logEdit, EM_SETSEL, length, length);
+    std::wstring line = message + L"\r\n";
+    SendMessageW(ui.logEdit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(line.c_str()));
+}
+
+void SetUiBusy(const UiState& ui, bool busy) {
+    EnableWindow(ui.pathEdit, !busy);
+    EnableWindow(ui.listView, !busy);
+}
+
+constexpr UINT WM_MYCEL_PROGRESS = WM_APP + 10;
+constexpr UINT WM_MYCEL_DONE = WM_APP + 11;
+
+struct ProgressUpdate {
+    uint64_t processed = 0;
+    uint64_t failed = 0;
+    std::wstring current;
+    std::wstring lastError;
+};
+
 }  // namespace
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -910,6 +975,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             int parts[2] = { rect.right - 200, -1 };
             SendMessageW(ui.statusBar, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
 
+            ui.progressBar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
+                                             WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
+                                             10, rect.bottom - 80, rect.right - 20, 18,
+                                             hwnd, nullptr, nullptr, nullptr);
+            SendMessageW(ui.progressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+            SendMessageW(ui.progressBar, PBM_SETPOS, 0, 0);
+
+            ui.logEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, nullptr,
+                                         WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+                                         10, rect.bottom - 200, rect.right - 20, 100,
+                                         hwnd, nullptr, nullptr, nullptr);
+
             SendMessageW(ui.pathEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
             SendMessageW(refreshButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
             SendMessageW(applyButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
@@ -920,6 +997,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             SendMessageW(driveButton, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
             SendMessageW(ui.listView, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
             SendMessageW(ui.statusBar, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(ui.progressBar, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
+            SendMessageW(ui.logEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ui.uiFont), TRUE);
 
             PopulateListView(ui, GetEditText(ui.pathEdit));
             return 0;
@@ -931,8 +1010,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             RECT statusRect;
             GetWindowRect(ui.statusBar, &statusRect);
             int statusHeight = statusRect.bottom - statusRect.top;
+            int logHeight = 110;
+            int progressHeight = 18;
+            int padding = 10;
+            int bottomArea = logHeight + progressHeight + (padding * 2);
             SetWindowPos(ui.listView, nullptr, 10, 44, rect.right - 20,
-                         rect.bottom - 54 - statusHeight, SWP_NOZORDER);
+                         rect.bottom - 54 - statusHeight - bottomArea, SWP_NOZORDER);
+            SetWindowPos(ui.logEdit, nullptr, 10,
+                         rect.bottom - statusHeight - logHeight - progressHeight - padding,
+                         rect.right - 20, logHeight, SWP_NOZORDER);
+            SetWindowPos(ui.progressBar, nullptr, 10,
+                         rect.bottom - statusHeight - progressHeight,
+                         rect.right - 20, progressHeight, SWP_NOZORDER);
             int parts[2] = { rect.right - 200, -1 };
             SendMessageW(ui.statusBar, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
             return 0;
@@ -978,6 +1067,42 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 }
             }
             break;
+        }
+        case WM_MYCEL_PROGRESS: {
+            std::unique_ptr<ProgressUpdate> update(reinterpret_cast<ProgressUpdate*>(lparam));
+            if (ui.progressBar) {
+                SendMessageW(ui.progressBar, PBM_SETMARQUEE, TRUE, 30);
+            }
+            std::wstring line = L"[" + std::to_wstring(update->processed) + L"/" +
+                                std::to_wstring(update->failed) + L"] " + update->current;
+            if (!update->lastError.empty()) {
+                line += L" (Fehler: " + update->lastError + L")";
+            }
+            AppendLog(ui, line);
+            return 0;
+        }
+        case WM_MYCEL_DONE: {
+            std::unique_ptr<ProgressUpdate> update(reinterpret_cast<ProgressUpdate*>(lparam));
+            if (ui.progressBar) {
+                SendMessageW(ui.progressBar, PBM_SETMARQUEE, FALSE, 0);
+                SendMessageW(ui.progressBar, PBM_SETPOS, 100, 0);
+            }
+            ui.isBusy = false;
+            SetUiBusy(ui, false);
+            if (ui.workerThread) {
+                CloseHandle(ui.workerThread);
+                ui.workerThread = nullptr;
+            }
+            std::wstring message = L"Fertig. Dateien verarbeitet: " + std::to_wstring(update->processed);
+            if (update->failed > 0) {
+                message += L"\nFehler: " + std::to_wstring(update->failed);
+                if (!update->lastError.empty()) {
+                    message += L"\nLetzter Fehler: " + update->lastError;
+                }
+            }
+            ShowMessage(hwnd, message);
+            PopulateListView(ui, GetEditText(ui.pathEdit));
+            return 0;
         }
         case WM_COMMAND: {
             switch (LOWORD(wparam)) {
@@ -1037,27 +1162,32 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     return 0;
                 }
                 case kTransformFolderId: {
+                    if (ui.isBusy) {
+                        ShowMessage(hwnd, L"Bitte warten, eine Aufgabe läuft bereits.");
+                        return 0;
+                    }
                     std::wstring folder = GetEditText(ui.pathEdit);
                     if (folder.empty()) {
                         ShowMessage(hwnd, L"Bitte einen Ordner angeben.");
                         return 0;
                     }
-                    uint64_t processed = 0;
-                    uint64_t failed = 0;
-                    std::wstring lastError;
-                    ProcessFolderRecursive(folder, processed, failed, lastError);
-                    std::wstring message = L"Fertig. Dateien verarbeitet: " + std::to_wstring(processed);
-                    if (failed > 0) {
-                        message += L"\nFehler: " + std::to_wstring(failed);
-                        if (!lastError.empty()) {
-                            message += L"\nLetzter Fehler: " + lastError;
-                        }
-                    }
-                    ShowMessage(hwnd, message);
-                    PopulateListView(ui, folder);
+                    ui.isBusy = true;
+                    SetUiBusy(ui, true);
+                    SendMessageW(ui.progressBar, PBM_SETPOS, 0, 0);
+                    SendMessageW(ui.progressBar, PBM_SETMARQUEE, TRUE, 30);
+                    AppendLog(ui, L"Starte Ordner-Verarbeitung: " + folder);
+                    ProcessContext* context = new ProcessContext();
+                    context->hwnd = hwnd;
+                    context->root = folder;
+                    context->processDrive = false;
+                    ui.workerThread = CreateThread(nullptr, 0, ProcessWorker, context, 0, nullptr);
                     return 0;
                 }
                 case kTransformDriveId: {
+                    if (ui.isBusy) {
+                        ShowMessage(hwnd, L"Bitte warten, eine Aufgabe läuft bereits.");
+                        return 0;
+                    }
                     std::wstring folder = GetEditText(ui.pathEdit);
                     std::wstring root = RootFromPath(folder);
                     std::wstring prompt = L"Ganzen Datenträger " + root +
@@ -1066,19 +1196,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                                     MB_YESNO | MB_ICONWARNING) != IDYES) {
                         return 0;
                     }
-                    uint64_t processed = 0;
-                    uint64_t failed = 0;
-                    std::wstring lastError;
-                    ProcessFolderRecursive(root, processed, failed, lastError);
-                    std::wstring message = L"Fertig. Dateien verarbeitet: " + std::to_wstring(processed);
-                    if (failed > 0) {
-                        message += L"\nFehler: " + std::to_wstring(failed);
-                        if (!lastError.empty()) {
-                            message += L"\nLetzter Fehler: " + lastError;
-                        }
-                    }
-                    ShowMessage(hwnd, message);
-                    PopulateListView(ui, folder);
+                    ui.isBusy = true;
+                    SetUiBusy(ui, true);
+                    SendMessageW(ui.progressBar, PBM_SETPOS, 0, 0);
+                    SendMessageW(ui.progressBar, PBM_SETMARQUEE, TRUE, 30);
+                    AppendLog(ui, L"Starte Laufwerk-Verarbeitung: " + root);
+                    ProcessContext* context = new ProcessContext();
+                    context->hwnd = hwnd;
+                    context->root = root;
+                    context->processDrive = true;
+                    ui.workerThread = CreateThread(nullptr, 0, ProcessWorker, context, 0, nullptr);
                     return 0;
                 }
                 default:
